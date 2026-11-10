@@ -1,0 +1,47 @@
+rules_version = '2';
+// Stati del Mondo — regole di sicurezza del database.
+// Ogni utente ha un solo documento, users/{uid}, che può leggere e scrivere solo lui.
+// Tutto il resto del database è chiuso.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedInAs(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+    // Email confermata (gli account Google lo sono sempre): blocca chi crea account con email false.
+    function verified() {
+      return request.auth.token.email_verified == true
+          || request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+    function okField(d, k) {
+      return !(k in d) || (d[k] is string && d[k].size() <= 200000);
+    }
+    function validDoc(x) {
+      return x.keys().hasOnly(['v', 'rev', 'updatedAt', 'data'])
+          && x.v == 1
+          && x.rev is string && x.rev.size() <= 40
+          && x.updatedAt == request.time
+          && x.data is map
+          && x.data.keys().hasOnly([
+               'worldgame_progress_v1', 'worldgame_saved_quizzes_v1', 'worldgame_saved_challenges_v1',
+               'worldgame_typeall_best_v1', 'worldgame_challenge_v1', 'worldgame_sound'])
+          && okField(x.data, 'worldgame_progress_v1')
+          && okField(x.data, 'worldgame_saved_quizzes_v1')
+          && okField(x.data, 'worldgame_saved_challenges_v1')
+          && okField(x.data, 'worldgame_typeall_best_v1')
+          && okField(x.data, 'worldgame_challenge_v1')
+          && okField(x.data, 'worldgame_sound');
+    }
+
+    match /users/{uid} {
+      allow get: if signedInAs(uid);
+      allow delete: if signedInAs(uid);
+      allow create, update: if signedInAs(uid) && verified() && validDoc(request.resource.data);
+      // niente "list": nessuno può elencare i documenti degli altri
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
