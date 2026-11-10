@@ -495,14 +495,18 @@ function askNick(){
         const taken = await getDoc(doc(db, 'nicks', low));
         if(taken.exists() && taken.data().uid !== uid) throw { code: 'taken' };
         const b = writeBatch(db);
-        b.set(doc(db, 'nicks', low), { uid });
+        if(!taken.exists()) b.set(doc(db, 'nicks', low), { uid });   // già tuo (es. cambi solo maiuscole): non va riscritto
         b.set(doc(db, 'profiles', uid), { nick: v }, { merge: true });
-        if(nick && nick.toLowerCase() !== low) b.delete(doc(db, 'nicks', nick.toLowerCase()));
+        // soprannome attuale letto dal server (non solo dalla memoria della pagina), così il vecchio viene sempre liberato
+        let old = nick;
+        try{ const ps = await getDoc(doc(db, 'profiles', uid)); if(ps.exists() && ps.data().nick) old = ps.data().nick; }catch(e2){}
+        if(old && old.toLowerCase() !== low) b.delete(doc(db, 'nicks', old.toLowerCase()));
         await b.commit();
         nick = v; FB.refreshModal(); close(true);
       }catch(ex){
         m.querySelectorAll('button,input').forEach(x => { x.disabled = false; });
-        err.textContent = ex && ex.code === 'taken' ? t('nickTaken') : (ex && ex.code === 'permission-denied' ? t('nickTaken') : t('err'));
+        console.warn('[community] nick', ex);
+        err.textContent = ex && ex.code === 'taken' ? t('nickTaken') : t('err');
         err.hidden = false;
       }
     });
