@@ -37,7 +37,8 @@ const SYNC_KEYS = [
   'worldgame_saved_challenges_v1',  // "Le tue sfide"
   'worldgame_typeall_best_v1',      // record di "Scrivili tutti"
   'worldgame_challenge_v1',         // ultime impostazioni della Sfida
-  'worldgame_sound'                 // suoni sì/no
+  'worldgame_sound',                // suoni sì/no
+  'worldgame_liked_v1'              // sfide della community a cui hai messo "mi piace"
 ];
 const META_KEY = 'worldgame_sync_meta_v1';   // {uid, rev, dirty} — solo locale, non viene sincronizzato
 const MAX_FIELD = 200000;                     // stesso limite delle regole Firestore
@@ -316,6 +317,7 @@ function injectStyles(){
   #wg-acc-modal .acc-who{ font-weight:800; word-break:break-all; color:var(--ink); }
   #wg-acc-modal .btn-row{ display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
   #wg-acc-modal .acc-danger{ color:var(--bad); }
+  #wg-acc-modal .acc-extra:empty{ display:none; }
   #wg-acc-toast{ position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:60; background:var(--ink); color:var(--paper); padding:10px 18px; border-radius:14px; font-weight:700; font-size:.9rem; box-shadow:0 4px 0 rgba(0,0,0,.25); max-width:calc(100% - 32px); text-align:center; }
   `;
   document.head.appendChild(s);
@@ -380,6 +382,7 @@ function renderModal(message){
       <p class="acc-status">${esc(st)}</p>
       ${message ? `<p class="acc-msg">${esc(message)}</p>` : ''}
       <div class="form-error" role="alert" hidden></div>
+      <div class="acc-extra"></div>
       <div class="btn-row">
         <button class="btn ghost btn-sm acc-danger" data-a="delete">${t('del')}</button>
         <button class="btn ghost btn-sm" data-a="signout">${t('signout')}</button>
@@ -408,6 +411,8 @@ function renderModal(message){
     card.querySelector('form').addEventListener('submit', onSubmit);
   }
   card.querySelectorAll('[data-a]').forEach(b => b.addEventListener('click', onAction));
+  const extra = card.querySelector('.acc-extra');
+  if(extra && typeof FB.accountExtras === 'function'){ try{ FB.accountExtras(extra); }catch(e){} }
 }
 function showError(msg){
   const el = modal.querySelector('.form-error');
@@ -498,9 +503,18 @@ function toast(msg){
 }
 
 /* ------------------------------------------------------------------ avvio */
+/* Per community.js: stessa app Firebase, stesso utente. */
+const userListeners = [];
+const FB = window.__wgFB = {
+  get app(){ return app; }, get auth(){ return auth; }, get db(){ return db; }, get user(){ return user; },
+  canSync: () => !!(user && canSync(user)),
+  onUser(fn){ userListeners.push(fn); if(ready) fn(user); },
+  openLogin(){ openModal(); }, toast, accountExtras: null, refreshModal(){ if(modal && !modal.hidden) renderModal(); }
+};
 let lastUid = null;
 function onUser(u){
   user = u;
+  userListeners.forEach(fn => { try{ fn(u); }catch(e){} });
   renderButton();
   if(!modal.hidden) renderModal();
   if(u && canSync(u)){
@@ -520,6 +534,7 @@ function start(){
     auth = getAuth(app);
     auth.languageCode = lang();
     db = getFirestore(app);
+    window.dispatchEvent(new Event('wg-fb-ready'));
   }catch(e){ console.warn('[account] init', e); btn.hidden = true; return; }
   setPersistence(auth, browserLocalPersistence).catch(() => {});
   onAuthStateChanged(auth, u => { ready = true; onUser(u); });

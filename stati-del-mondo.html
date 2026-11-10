@@ -1137,6 +1137,7 @@
         <p class="field-hint" data-i18n="chs.hint">Salva fino a 3 sfide con le tue impostazioni e i tuoi stati: per ognuna il sito tiene il record e lo storico delle partite.</p>
         <div class="saved-grid" id="chs-grid"></div>
       </div>
+      <div class="pub-section" id="pub-section" hidden></div>
       <div class="form-card">
         <div class="ch-edit-head" id="ch-edit-head" hidden>
           <h3 id="ch-ed-title"></h3>
@@ -12169,12 +12170,12 @@
   var CHS_KEY = 'worldgame_saved_challenges_v1';
   function chsLoad(){ try{ var v = JSON.parse(localStorage.getItem(CHS_KEY)||'[]'); return Array.isArray(v) ? v.slice(0,3) : []; }catch(e){ return []; } }
   function chsSave(list){ try{ localStorage.setItem(CHS_KEY, JSON.stringify(list.slice(0,3))); return true; }catch(e){ return false; } }
-  function chsGet(id){ return chsLoad().filter(function(x){ return x.id===id; })[0] || null; }
+  function chsGet(id){ if(CH.pub && CH.pub.id===id) return CH.pub; return chsLoad().filter(function(x){ return x.id===id; })[0] || null; }
   function chsSettingsCopy(st){ return { mode:st.mode, secs:st.secs, players:st.players, rounds:st.rounds, size:'all', input:st.input||'voice', errors:st.errors||0 }; }
   function chsDate(ms){ try{ return new Date(ms).toLocaleDateString(LANG==='en' ? 'en-GB' : 'it-IT', { day:'2-digit', month:'2-digit', year:'numeric' }); }catch(e){ return ''; } }
   function chRestoreBase(){
     if(CH.baseSettings){ CH.settings = CH.baseSettings; CH.baseSettings = null; }
-    CH.playing = null; CH.edit = null;
+    CH.playing = null; CH.edit = null; CH.pub = null;
   }
   function chsByCca3(){ var m = {}; DATA.countries.forEach(function(c){ m[c.cca3] = c; }); return m; }
 
@@ -12225,6 +12226,7 @@
 
   // Registra la partita appena finita di una sfida salvata; ritorna true se è un nuovo record.
   function chsRecordPlay(g){
+    if(CH.pub && g.savedId===CH.pub.id) return chsRecordPublic(g, CH.pub);
     var list = chsLoad(), sv = list.filter(function(x){ return x.id===g.savedId; })[0];
     if(!sv) return false;
     var order = g.names.map(function(n,i){ return i; }).sort(chRankCmp(g));
@@ -12236,6 +12238,18 @@
     var isRec = !sv.best || best > sv.best.s || (best===sv.best.s && bestT!=null && (sv.best.t==null || bestT < sv.best.t));
     if(isRec) sv.best = { s:best, n:g.settings.rounds, t:bestT, name: who.map(function(i){ return g.names[i]; }).join(', '), d: play.d };
     chsSave(list);
+    return isRec;
+  }
+
+  function chsRecordPublic(g, pv){
+    var s = g.scores[0], t = g.times ? Math.round(g.times[0]) : null;
+    var b = pv.best;
+    var isRec = !b || s > b.s || (s===b.s && t!=null && (b.t==null || t < b.t));
+    pv.count = (pv.count||0) + 1;
+    var nick = window.__wgCommunity && window.__wgCommunity.nick ? window.__wgCommunity.nick() : null;
+    if(isRec && nick) pv.best = { s:s, n:g.settings.rounds, t:t, name:'@'+nick, d:Date.now() };
+    else if(isRec) isRec = false;      // senza soprannome il record non può essere registrato online
+    try{ if(window.__wgCommunity) window.__wgCommunity.onEnd(pv, { s:s, n:g.settings.rounds, t:t, isRec:isRec }); }catch(e){}
     return isRec;
   }
 
@@ -12282,6 +12296,7 @@
         del.classList.add('armed'); del.textContent = T('chs.del.confirm');
         setTimeout(function(){ if(del.isConnected){ del.classList.remove('armed'); del.textContent = T('chs.del'); } }, 3500);
       });
+      try{ if(window.__wgCommunity) window.__wgCommunity.decorateSaved(card, sv); }catch(e){}
       grid.appendChild(card);
     });
     for(var i=list.length; i<3; i++){
@@ -12364,6 +12379,7 @@
     document.getElementById('ch-cta-row').hidden = !!e;
     document.getElementById('ch-edit-cta').hidden = !e;
     document.getElementById('btn-back-challenge').hidden = !!e;
+    try{ if(window.__wgCommunity) window.__wgCommunity.render(!!e); }catch(err){}
     if(!e){ renderChsList(); return; }
     document.getElementById('ch-ed-title').textContent = e.id ? T('chs.edit.title') : T('chs.edit.new');
     var nm = document.getElementById('ch-ed-name');
@@ -12387,6 +12403,32 @@
     var sv = id ? chsGet(id) : null; if(!sv) return null;
     var m = {}; (sv.states||[]).forEach(function(k){ m[k] = true; }); return m;
   }
+
+  // Sfide della community (community.js): gioca una sfida pubblicata da un altro utente.
+  // Si gioca sempre da soli e scrivendo, così punteggio e tempo sono confrontabili e controllati dal gioco.
+  window.__wgGame = {
+    playPublic: function(p){
+      if(!chPrefsLoaded){ chLoadPrefs(); chPrefsLoaded = true; }
+      if(!CH.baseSettings) CH.baseSettings = CH.settings;
+      CH.edit = null;
+      var st = JSON.parse(JSON.stringify(p.settings)); st.players = 1; st.input = 'text';
+      CH.pub = { id:p.id, pubId:p.pubId, name:p.name, settings:st, states:p.states.slice(), best:p.best || null, count:p.count||0, pub:true };
+      CH.settings = JSON.parse(JSON.stringify(st));
+      CH.playing = CH.pub.id;
+      renderChallengeNames(); showScreen('challenge-names'); window.scrollTo(0,0);
+      var nick = window.__wgCommunity && window.__wgCommunity.nick ? window.__wgCommunity.nick() : null;
+      var inp = document.querySelector('#ch-names input'); if(inp && nick && !inp.value){ inp.value = nick; inp.dispatchEvent(new Event('input', {bubbles:true})); }
+    },
+    summary: function(sv){ return chsSummary(sv); },
+    fmtMs: function(ms){ return chFmtMs(ms); },
+    date: function(ms){ return chsDate(ms); },
+    settingsCopy: function(st){ return chsSettingsCopy(st); },
+    savedList: function(){ return chsLoad(); },
+    saveList: function(list){ return chsSave(list); },
+    rerenderSetup: function(){ if(currentScreenName==='challenge-setup') renderChallengeSetup(); },
+    screen: function(){ return currentScreenName; },
+    icons: ICONS
+  };
 
   function chRerender(){
     if(currentScreenName==='challenge-setup') renderChallengeSetup();
@@ -12428,4 +12470,5 @@
 
 
 <script type="module" src="account.js"></script>
+<script type="module" src="community.js"></script>
 </body></html>

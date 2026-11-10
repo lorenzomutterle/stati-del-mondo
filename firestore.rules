@@ -1,22 +1,26 @@
 rules_version = '2';
 // Stati del Mondo — regole di sicurezza del database.
-// Ogni utente ha un solo documento, users/{uid}, che può leggere e scrivere solo lui.
+// Dati privati: users/{uid}, leggibile e scrivibile solo dal proprietario.
+// Sfide della community: leggibili da tutti; ogni scrittura è controllata qui sotto.
 // Tutto il resto del database è chiuso.
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function signedInAs(uid) {
-      return request.auth != null && request.auth.uid == uid;
-    }
+    function signedIn() { return request.auth != null; }
+    function signedInAs(uid) { return signedIn() && request.auth.uid == uid; }
     // Email confermata (gli account Google lo sono sempre): blocca chi crea account con email false.
     function verified() {
-      return request.auth.token.email_verified == true
-          || request.auth.token.firebase.sign_in_provider == 'google.com';
+      return signedIn() && (request.auth.token.email_verified == true
+          || request.auth.token.firebase.sign_in_provider == 'google.com');
     }
+    function isAdmin() { return signedIn() && request.auth.uid == 'CB5ryHV0kAXCL2Nel9Z4jblgHN02'; }
+    function changed(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+
+    // ------------------------------------------------------------------ progressi privati
     function okField(d, k) {
       return !(k in d) || (d[k] is string && d[k].size() <= 200000);
     }
-    function validDoc(x) {
+    function validUserDoc(x) {
       return x.keys().hasOnly(['v', 'rev', 'updatedAt', 'data'])
           && x.v == 1
           && x.rev is string && x.rev.size() <= 40
@@ -24,20 +28,140 @@ service cloud.firestore {
           && x.data is map
           && x.data.keys().hasOnly([
                'worldgame_progress_v1', 'worldgame_saved_quizzes_v1', 'worldgame_saved_challenges_v1',
-               'worldgame_typeall_best_v1', 'worldgame_challenge_v1', 'worldgame_sound'])
+               'worldgame_typeall_best_v1', 'worldgame_challenge_v1', 'worldgame_sound', 'worldgame_liked_v1'])
           && okField(x.data, 'worldgame_progress_v1')
           && okField(x.data, 'worldgame_saved_quizzes_v1')
           && okField(x.data, 'worldgame_saved_challenges_v1')
           && okField(x.data, 'worldgame_typeall_best_v1')
           && okField(x.data, 'worldgame_challenge_v1')
-          && okField(x.data, 'worldgame_sound');
+          && okField(x.data, 'worldgame_sound')
+          && okField(x.data, 'worldgame_liked_v1');
+    }
+    match /users/{uid} {
+      allow get, delete: if signedInAs(uid);
+      allow create, update: if signedInAs(uid) && verified() && validUserDoc(request.resource.data);
     }
 
-    match /users/{uid} {
-      allow get: if signedInAs(uid);
-      allow delete: if signedInAs(uid);
-      allow create, update: if signedInAs(uid) && verified() && validDoc(request.resource.data);
-      // niente "list": nessuno può elencare i documenti degli altri
+    // ------------------------------------------------------------------ soprannomi
+    // profiles/{uid} = {nick, lastPub}; nicks/{soprannome in minuscolo} = {uid} garantisce che siano unici.
+    match /profiles/{uid} {
+      allow get, delete: if signedInAs(uid);
+      allow create, update: if signedInAs(uid) && verified()
+        && request.resource.data.keys().hasOnly(['nick', 'lastPub'])
+        && request.resource.data.nick is string
+        && request.resource.data.nick.matches('^[A-Za-z0-9_.-]{3,20}$')
+        && getAfter(/databases/$(database)/documents/nicks/$(request.resource.data.nick.lower())).data.uid == uid
+        && (!('lastPub' in request.resource.data)
+            || (resource != null && 'lastPub' in resource.data && request.resource.data.lastPub == resource.data.lastPub)
+            || request.resource.data.lastPub == request.time);
+    }
+    match /nicks/{name} {
+      allow get: if true;
+      allow create: if verified()
+        && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == request.auth.uid
+        && name.matches('^[a-z0-9_.-]{3,20}$');
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // ------------------------------------------------------------------ sfide della community
+    function myNick() { return get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.nick; }
+    function weekNow() { return math.floor(float(request.time.toMillis() + 259200000) / 604800000.0); }
+    function monthNow() { return request.time.year() * 12 + request.time.month() - 1; }
+    function near(v, x) { return v is int && v >= x - 1 && v <= x + 1; }
+    function validSettings(s) {
+      return s is map
+        && s.keys().hasOnly(['mode', 'secs', 'players', 'rounds', 'size', 'input', 'errors'])
+        && s.mode is string && s.mode.size() <= 20
+        && s.secs is int && s.secs >= 0 && s.secs <= 120
+        && s.players is int && s.players >= 1 && s.players <= 8
+        && s.rounds is int && s.rounds >= 1 && s.rounds <= 200
+        && s.size is string && s.size.size() <= 10
+        && s.input is string && s.input.size() <= 10
+        && s.errors is int && s.errors >= 0 && s.errors <= 10;
+    }
+    function validNewChallenge(x) {
+      return x.keys().hasOnly(['v', 'name', 'settings', 'states', 'author', 'authorNick', 'createdAt',
+                               'wk', 'mo', 'yr', 'likes', 'plays', 'rec'])
+        && x.v == 1
+        && x.name is string && x.name.size() >= 1 && x.name.size() <= 40
+        && validSettings(x.settings)
+        && x.states is list && x.states.size() >= 1 && x.states.size() <= 195
+        && x.author == request.auth.uid
+        && x.authorNick == myNick()
+        && x.createdAt == request.time
+        && near(x.wk, weekNow()) && near(x.mo, monthNow()) && near(x.yr, request.time.year())
+        && x.likes == 0 && x.plays == 0 && x.rec == null;
+    }
+    // Una pubblicazione ogni 2 minuti per persona (lastPub nel profilo, aggiornato nella stessa scrittura).
+    function publishAllowed() {
+      let before = get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data;
+      return getAfter(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.lastPub == request.time
+          && (!('lastPub' in before) || before.lastPub < request.time - duration.value(120, 's'));
+    }
+    function likeChange(cid) {
+      let likeDoc = /databases/$(database)/documents/public_challenges/$(cid)/likes/$(request.auth.uid);
+      return changed(['likes']) && (
+           (request.resource.data.likes == resource.data.likes + 1 && !exists(likeDoc) && existsAfter(likeDoc))
+        || (request.resource.data.likes == resource.data.likes - 1 && exists(likeDoc) && !existsAfter(likeDoc)));
+    }
+    // Il documento players/{uid} viene riscritto con l'ora del server a ogni partita registrata.
+    function lastPlayOlderThan(cid, secs) {
+      let p = /databases/$(database)/documents/public_challenges/$(cid)/players/$(request.auth.uid);
+      return getAfter(p).data.at == request.time
+          && (!exists(p) || get(p).data.at < request.time - duration.value(secs, 's'));
+    }
+    function validRecord(cid) {
+      let r = request.resource.data.rec;
+      let old = resource.data.rec;
+      let n = resource.data.settings.rounds;
+      return r is map && r.keys().hasOnly(['s', 'n', 't', 'nick', 'uid', 'd'])
+        && r.uid == request.auth.uid && r.nick == myNick()
+        && r.n == n && r.s is int && r.s >= 1 && r.s <= n
+        && r.t is int && r.t >= n * 700 && r.t <= 86400000
+        && r.d == request.time
+        && (old == null || r.s > old.s || (r.s == old.s && r.t < old.t));
+    }
+    function playChange(cid) {
+      return (changed(['plays']) && request.resource.data.plays == resource.data.plays + 1 && lastPlayOlderThan(cid, 60))
+          || (changed(['plays', 'rec']) && request.resource.data.plays == resource.data.plays + 1
+              && validRecord(cid) && lastPlayOlderThan(cid, 60))
+          || (changed(['rec']) && validRecord(cid) && lastPlayOlderThan(cid, 10));
+    }
+
+    match /public_challenges/{cid} {
+      allow get: if true;
+      allow list: if request.query.limit <= 50;
+      allow create: if verified() && validNewChallenge(request.resource.data) && publishAllowed();
+      allow update: if verified() && (likeChange(cid) || playChange(cid))
+                    || (isAdmin() && changed(['rec']) && request.resource.data.rec == null);
+      allow delete: if signedIn() && (resource.data.author == request.auth.uid || isAdmin());
+
+      match /likes/{uid} {
+        allow get: if signedInAs(uid);
+        allow create: if signedInAs(uid) && verified()
+          && request.resource.data.keys().hasOnly(['at']) && request.resource.data.at == request.time
+          && getAfter(/databases/$(database)/documents/public_challenges/$(cid)).data.likes == get(/databases/$(database)/documents/public_challenges/$(cid)).data.likes + 1;
+        allow delete: if signedInAs(uid)
+          && getAfter(/databases/$(database)/documents/public_challenges/$(cid)).data.likes == get(/databases/$(database)/documents/public_challenges/$(cid)).data.likes - 1;
+      }
+      match /players/{uid} {
+        allow get: if signedInAs(uid);
+        allow create, update: if signedInAs(uid) && verified()
+          && request.resource.data.keys().hasOnly(['at']) && request.resource.data.at == request.time
+          && (getAfter(/databases/$(database)/documents/public_challenges/$(cid)).data.plays == get(/databases/$(database)/documents/public_challenges/$(cid)).data.plays + 1
+              || getAfter(/databases/$(database)/documents/public_challenges/$(cid)).data.rec != get(/databases/$(database)/documents/public_challenges/$(cid)).data.rec);
+      }
+    }
+
+    // Segnalazioni: chiunque abbia un account può crearne una per sfida; le legge solo l'amministratore.
+    match /reports/{rid} {
+      allow create: if verified()
+        && rid == request.resource.data.pid + '_' + request.auth.uid
+        && request.resource.data.keys().hasOnly(['pid', 'uid', 'at'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.at == request.time;
+      allow read, delete: if isAdmin();
     }
 
     match /{document=**} {
