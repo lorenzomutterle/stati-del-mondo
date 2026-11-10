@@ -45,6 +45,14 @@ const TXT = {
     pubHint: 'La versione pubblicata resta com\'era: modificando questa sfida non cambia.',
     pubDone: 'Sfida pubblicata nella community!', unpubDone: 'Sfida ritirata dalla community.',
     pubWait: 'Puoi pubblicare una sfida ogni 2 minuti: riprova tra poco.',
+    pubDoneRec: 'Sfida pubblicata con il tuo record ({s}/{n} in {t})!',
+    pushRec: 'Pubblica nuovo record', pushHint: 'Hai fatto un record migliore di quello inviato: pubblicalo, conta anche come partita giocata.',
+    pushDone: 'Nuovo record pubblicato ({s}/{n} in {t}) e partita contata!',
+    pushPlayOnly: 'Partita contata. Il record online resta {rec}, che è migliore del tuo.',
+    pushRecOnly: 'Nuovo record pubblicato ({s}/{n} in {t}). La partita non è stata contata: ne conta una al minuto.',
+    pushWait: 'Hai appena registrato una partita su questa sfida: riprova tra un minuto.',
+    pushGone: 'Questa sfida non è più nella community.',
+    changedHint: 'Modificata dopo la pubblicazione: i nuovi record valgono solo qui.',
     needLogin: 'Accedi per mettere "mi piace", pubblicare e far contare i tuoi record.',
     needVerify: 'Conferma prima la tua email (dal pulsante dell\'account in alto).',
     endCounted: 'Partita registrata nella community.', endRec: 'Nuovo record della community salvato!',
@@ -73,6 +81,14 @@ const TXT = {
     pubHint: 'The published version stays as it was: editing this challenge doesn\'t change it.',
     pubDone: 'Challenge published to the community!', unpubDone: 'Challenge withdrawn from the community.',
     pubWait: 'You can publish one challenge every 2 minutes: try again shortly.',
+    pubDoneRec: 'Challenge published with your record ({s}/{n} in {t})!',
+    pushRec: 'Publish new record', pushHint: 'You beat the record you sent: publish it, it also counts as a game played.',
+    pushDone: 'New record published ({s}/{n} in {t}) and game counted!',
+    pushPlayOnly: 'Game counted. The online record stays {rec}, which beats yours.',
+    pushRecOnly: 'New record published ({s}/{n} in {t}). The game wasn\'t counted: one counts per minute.',
+    pushWait: 'You just recorded a game on this challenge: try again in a minute.',
+    pushGone: 'This challenge is no longer in the community.',
+    changedHint: 'Edited after publishing: new records only count here.',
     needLogin: 'Sign in to like, publish and have your records count.',
     needVerify: 'Confirm your email first (from the account button at the top).',
     endCounted: 'Game recorded in the community.', endRec: 'New community record saved!',
@@ -181,6 +197,7 @@ function injectStyles(){
   .pub-more{ margin-top:12px; }
   .pub-flag{ font-size:.8rem; }
   .chs-pub-row{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:6px; font-size:.82rem; }
+  .chs-pub-note{ margin:0; width:100%; }
   .chs-pub-badge{ background:var(--good-bg); color:var(--good); font-weight:800; border-radius:999px; padding:2px 9px; }
   #wg-nick-modal .text-field{ width:100%; max-width:none; box-sizing:border-box; }
   .acc-nick{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:.9rem; color:var(--ink-soft); }
@@ -323,31 +340,75 @@ async function removePublic(id){
   try{ await deleteDoc(doc(db, 'public_challenges', id)); }catch(e){ FB.toast(t('err')); return; }
   dropCached(id);
   const list = G().savedList(); let ch = false;
-  list.forEach(sv => { if(sv.pubId === id){ delete sv.pubId; ch = true; } });
+  list.forEach(sv => { if(sv.pubId === id){ delete sv.pubId; delete sv.pubSig; delete sv.pubSent; ch = true; } });
   if(ch) G().saveList(list);
   FB.toast(t('unpubDone'));
   G().rerenderSetup();
 }
+/* Record della sfida salvata utilizzabile online: fatto scrivendo e con il tempo misurato. */
+function localRec(sv){
+  const b = sv && sv.best, n = sv && sv.settings && sv.settings.rounds;
+  // solo record fatti scrivendo: a voce è il giocatore stesso a dire se ha indovinato
+  if(!b || b.inp !== 'text' || b.t == null || !(b.s >= 1) || b.n !== n || b.s > n || b.t < n * MIN_MS_PER_Q) return null;
+  return { s: b.s, n, t: Math.round(b.t) };
+}
+const better = (a, b) => !!a && (!b || a.s > b.s || (a.s === b.s && a.t < b.t));
+function sig(sv){ return JSON.stringify([G().settingsCopy(sv.settings), (sv.states || []).slice().sort()]); }
+function updateSaved(id, fn){ const list = G().savedList(); list.forEach(x => { if(x.id === id) fn(x); }); G().saveList(list); }
+
 async function publish(sv, btn){
   if(needAccount()) return;
   if(!nick){ const ok = await askNick(); if(!ok) return; }
   btn.disabled = true;
   const uid = me().uid, now = Date.now(), bk = buckets(now);
   const ref = doc(collection(db, 'public_challenges'));
+  const lr = localRec(sv);
   const b = writeBatch(db);
   b.set(ref, {
     v: 1, name: String(sv.name).slice(0, 40), settings: G().settingsCopy(sv.settings), states: (sv.states || []).slice(0, 195),
     author: uid, authorNick: nick, createdAt: serverTimestamp(), wk: bk.wk, mo: bk.mo, yr: bk.yr,
-    likes: 0, plays: 0, rec: null
+    likes: 0, plays: lr ? 1 : 0, rec: lr ? { s: lr.s, n: lr.n, t: lr.t, nick, uid, d: serverTimestamp() } : null
   });
   b.set(doc(db, 'profiles', uid), { nick, lastPub: serverTimestamp() });
   try{ await b.commit(); }
   catch(e){ btn.disabled = false; console.warn('[community] publish', e); FB.toast(e && e.code === 'permission-denied' ? t('pubWait') : t('err')); return; }
-  const list = G().savedList(); list.forEach(x => { if(x.id === sv.id) x.pubId = ref.id; }); G().saveList(list);
+  updateSaved(sv.id, x => { x.pubId = ref.id; x.pubSig = sig(sv); x.pubSent = lr; });
   cache.clear(); ui.sort = 'new'; ui.shown = PAGE;
-  FB.toast(t('pubDone'));
+  FB.toast(lr ? t('pubDoneRec', { s: lr.s, n: lr.n, t: G().fmtMs(lr.t) }) : t('pubDone'));
   G().rerenderSetup();
 }
+/* "Pubblica" di nuovo su una sfida già pubblicata: invia il nuovo record e conta la partita. */
+async function pushRecord(sv, btn){
+  if(needAccount()) return;
+  if(!nick){ const ok = await askNick(); if(!ok) return; }
+  const lr = localRec(sv); if(!lr) return;
+  btn.disabled = true;
+  const uid = me().uid, id = sv.pubId;
+  const cref = doc(db, 'public_challenges', id), pref = doc(db, 'public_challenges', id, 'players', uid);
+  let online, last = 0;
+  try{
+    const cs = await getDoc(cref);
+    if(!cs.exists()){ updateSaved(sv.id, x => { delete x.pubId; delete x.pubSig; delete x.pubSent; }); FB.toast(t('pushGone')); G().rerenderSetup(); return; }
+    online = cs.data();
+    const ps = await getDoc(pref); if(ps.exists() && ps.data().at) last = ps.data().at.toMillis();
+  }catch(e){ btn.disabled = false; FB.toast(t('err')); return; }
+  const countIt = Date.now() - last >= PLAY_EVERY_MS + 2000;
+  const recIt = better(lr, online.rec) && Date.now() - last >= 12000;
+  if(!countIt && !recIt){ btn.disabled = false; FB.toast(t('pushWait')); return; }
+  const upd = {};
+  if(countIt) upd.plays = increment(1);
+  if(recIt) upd.rec = { s: lr.s, n: lr.n, t: lr.t, nick, uid, d: serverTimestamp() };
+  const b = writeBatch(db);
+  b.update(cref, upd); b.set(pref, { at: serverTimestamp() });
+  try{ await b.commit(); }
+  catch(e){ btn.disabled = false; console.warn('[community] push', e); FB.toast(t('err')); return; }
+  updateSaved(sv.id, x => { x.pubSent = lr; });
+  patchCached(id, y => { if(countIt) y.plays = (y.plays || 0) + 1; if(recIt) y.rec = { s: lr.s, n: lr.n, t: lr.t, nick, uid }; });
+  const v = { s: lr.s, n: lr.n, t: G().fmtMs(lr.t) };
+  FB.toast(recIt && countIt ? t('pushDone', v) : recIt ? t('pushRecOnly', v) : t('pushPlayOnly', { rec: recText(online.rec).replace(/^[^:]*:\s*/, '') }));
+  G().rerenderSetup();
+}
+
 function decorateSaved(cardEl, sv){
   if(!db) return;
   const row = el('div', 'chs-pub-row');
@@ -360,6 +421,12 @@ function decorateSaved(cardEl, sv){
     });
     row.appendChild(w);
     row.title = t('pubHint');
+    if(sv.pubSig && sv.pubSig !== sig(sv)) row.appendChild(el('span', 'field-hint chs-pub-note', t('changedHint')));
+    else if(better(localRec(sv), sv.pubSent || null)){
+      const p = el('button', 'btn primary btn-sm', t('pushRec')); p.type = 'button'; p.title = t('pushHint');
+      p.addEventListener('click', () => pushRecord(sv, p));
+      row.insertBefore(p, row.firstChild);
+    }
   }else{
     const p = el('button', 'btn ghost btn-sm', t('publish')); p.type = 'button';
     p.addEventListener('click', () => publish(sv, p));

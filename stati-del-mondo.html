@@ -12236,7 +12236,7 @@
     sv.plays = [play].concat(sv.plays||[]).slice(0,20);
     sv.count = (sv.count||0) + 1;
     var isRec = !sv.best || best > sv.best.s || (best===sv.best.s && bestT!=null && (sv.best.t==null || bestT < sv.best.t));
-    if(isRec) sv.best = { s:best, n:g.settings.rounds, t:bestT, name: who.map(function(i){ return g.names[i]; }).join(', '), d: play.d };
+    if(isRec) sv.best = { s:best, n:g.settings.rounds, t:bestT, name: who.map(function(i){ return g.names[i]; }).join(', '), d: play.d, inp: g.settings.input };
     chsSave(list);
     return isRec;
   }
