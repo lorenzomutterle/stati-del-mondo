@@ -12237,7 +12237,13 @@
     sv.count = (sv.count||0) + 1;
     var isRec = !sv.best || best > sv.best.s || (best===sv.best.s && bestT!=null && (sv.best.t==null || bestT < sv.best.t));
     if(isRec) sv.best = { s:best, n:g.settings.rounds, t:bestT, name: who.map(function(i){ return g.names[i]; }).join(', '), d: play.d, inp: g.settings.input };
+    // record a parte delle sole partite scrivendo: è quello che può andare nella community
+    if(g.settings.input==='text' && bestT!=null){
+      var bt = sv.bestText;
+      if(!bt || bt.n!==g.settings.rounds || best > bt.s || (best===bt.s && bestT < bt.t)) sv.bestText = { s:best, n:g.settings.rounds, t:bestT, d: play.d };
+    }
     chsSave(list);
+    try{ if(window.__wgCommunity && sv.pubId) window.__wgCommunity.onSavedEnd(sv.id); }catch(e){}
     return isRec;
   }
 

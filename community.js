@@ -213,6 +213,7 @@ function render(editing){
   ui.editing = editing;
   root.hidden = editing;
   if(editing) return;
+  setTimeout(autoPushAll, 0);
   root.innerHTML = '';
   const head = el('div', 'saved-head'); head.appendChild(el('h3', null, t('title'))); root.appendChild(head);
   root.appendChild(el('p', 'field-hint', t('hint')));
@@ -345,15 +346,26 @@ async function removePublic(id){
   FB.toast(t('unpubDone'));
   G().rerenderSetup();
 }
-/* Record della sfida salvata utilizzabile online: fatto scrivendo e con il tempo misurato. */
+/* Miglior record della sfida salvata fatto scrivendo (solo quelli vanno online:
+   a voce è il giocatore stesso a dire se ha indovinato). */
 function localRec(sv){
-  const b = sv && sv.best, n = sv && sv.settings && sv.settings.rounds;
-  // solo record fatti scrivendo: a voce è il giocatore stesso a dire se ha indovinato
-  if(!b || b.inp !== 'text' || b.t == null || !(b.s >= 1) || b.n !== n || b.s > n || b.t < n * MIN_MS_PER_Q) return null;
-  return { s: b.s, n, t: Math.round(b.t) };
+  const n = sv && sv.settings && sv.settings.rounds;
+  const ok = r => r && r.n === n && r.t != null && r.s >= 1 && r.s <= n && r.t >= n * MIN_MS_PER_Q;
+  const cands = [];
+  if(ok(sv && sv.bestText)) cands.push(sv.bestText);
+  const b = sv && sv.best;
+  // i record salvati prima che il gioco annotasse il modo (inp) valgono se la sfida si gioca scrivendo
+  if(ok(b) && (b.inp === 'text' || (b.inp == null && sv.settings.input === 'text'))) cands.push(b);
+  let r = null;
+  cands.forEach(c => { const x = { s: c.s, n, t: Math.round(c.t) }; if(better(x, r)) r = x; });
+  return r;
 }
 const better = (a, b) => !!a && (!b || a.s > b.s || (a.s === b.s && a.t < b.t));
-function sig(sv){ return JSON.stringify([G().settingsCopy(sv.settings), (sv.states || []).slice().sort()]); }
+// "Stessa sfida" = stessi stati, modalità, tempo, domande, errori. Giocatori e modo di risposta non contano:
+// online si gioca sempre da soli e scrivendo, quindi si può passare la propria sfida a "scrivendo" senza perderne il legame.
+function sig(sv){ const st = G().settingsCopy(sv.settings); delete st.players; delete st.input; return JSON.stringify([st, (sv.states || []).slice().sort()]); }
+function sigLegacy(sv){ return JSON.stringify([G().settingsCopy(sv.settings), (sv.states || []).slice().sort()]); }
+const sameSig = sv => !sv.pubSig || sv.pubSig === sig(sv) || sv.pubSig === sigLegacy(sv);
 function updateSaved(id, fn){ const list = G().savedList(); list.forEach(x => { if(x.id === id) fn(x); }); G().saveList(list); }
 
 async function publish(sv, btn){
@@ -378,10 +390,16 @@ async function publish(sv, btn){
   G().rerenderSetup();
 }
 /* "Pubblica" di nuovo su una sfida già pubblicata: invia il nuovo record e conta la partita. */
-async function pushRecord(sv, btn){
-  if(needAccount()) return;
-  if(!nick){ const ok = await askNick(); if(!ok) return; }
+async function pushRecord(sv, btn, auto){
+  if(auto){ if(!me() || !verified() || !nick) return; }
+  else{ if(needAccount()) return; if(!nick){ const ok = await askNick(); if(!ok) return; } }
   const lr = localRec(sv); if(!lr) return;
+  if(pushing.has(sv.id)) return;
+  pushing.add(sv.id);
+  try{ await pushRecordInner(sv, btn || { disabled: false }, auto, lr); } finally { pushing.delete(sv.id); }
+}
+const pushing = new Set();
+async function pushRecordInner(sv, btn, auto, lr){
   btn.disabled = true;
   const uid = me().uid, id = sv.pubId;
   const cref = doc(db, 'public_challenges', id), pref = doc(db, 'public_challenges', id, 'players', uid);
@@ -391,22 +409,34 @@ async function pushRecord(sv, btn){
     if(!cs.exists()){ updateSaved(sv.id, x => { delete x.pubId; delete x.pubSig; delete x.pubSent; }); FB.toast(t('pushGone')); G().rerenderSetup(); return; }
     online = cs.data();
     const ps = await getDoc(pref); if(ps.exists() && ps.data().at) last = ps.data().at.toMillis();
-  }catch(e){ btn.disabled = false; FB.toast(t('err')); return; }
+  }catch(e){ btn.disabled = false; if(!auto) FB.toast(t('err')); return; }
   const countIt = Date.now() - last >= PLAY_EVERY_MS + 2000;
   const recIt = better(lr, online.rec) && Date.now() - last >= 12000;
-  if(!countIt && !recIt){ btn.disabled = false; FB.toast(t('pushWait')); return; }
+  if(!countIt && !recIt){ btn.disabled = false; if(!auto) FB.toast(t('pushWait')); return; }
   const upd = {};
   if(countIt) upd.plays = increment(1);
   if(recIt) upd.rec = { s: lr.s, n: lr.n, t: lr.t, nick, uid, d: serverTimestamp() };
   const b = writeBatch(db);
   b.update(cref, upd); b.set(pref, { at: serverTimestamp() });
   try{ await b.commit(); }
-  catch(e){ btn.disabled = false; console.warn('[community] push', e); FB.toast(t('err')); return; }
+  catch(e){ btn.disabled = false; console.warn('[community] push', e); if(!auto) FB.toast(t('err')); return; }
   updateSaved(sv.id, x => { x.pubSent = lr; });
   patchCached(id, y => { if(countIt) y.plays = (y.plays || 0) + 1; if(recIt) y.rec = { s: lr.s, n: lr.n, t: lr.t, nick, uid }; });
   const v = { s: lr.s, n: lr.n, t: G().fmtMs(lr.t) };
   FB.toast(recIt && countIt ? t('pushDone', v) : recIt ? t('pushRecOnly', v) : t('pushPlayOnly', { rec: recText(online.rec).replace(/^[^:]*:\s*/, '') }));
   G().rerenderSetup();
+}
+
+/* Invio automatico: il record fatto sulla propria sfida pubblicata va online da solo
+   (a fine partita, e all'apertura della schermata per quelli rimasti in sospeso). */
+function pendingPush(sv){ return sv.pubId && sameSig(sv) && better(localRec(sv), sv.pubSent || null); }
+function autoPushAll(){
+  if(!me() || !verified() || !nick || !G()) return;
+  G().savedList().filter(pendingPush).forEach(sv => pushRecord(sv, null, true));
+}
+function onSavedEnd(id){
+  const sv = G().savedList().filter(x => x.id === id)[0];
+  if(sv && pendingPush(sv)) pushRecord(sv, null, true);
 }
 
 function decorateSaved(cardEl, sv){
@@ -421,8 +451,8 @@ function decorateSaved(cardEl, sv){
     });
     row.appendChild(w);
     row.title = t('pubHint');
-    if(sv.pubSig && sv.pubSig !== sig(sv)) row.appendChild(el('span', 'field-hint chs-pub-note', t('changedHint')));
-    else if(better(localRec(sv), sv.pubSent || null)){
+    if(!sameSig(sv)) row.appendChild(el('span', 'field-hint chs-pub-note', t('changedHint')));
+    else if(pendingPush(sv)){
       const p = el('button', 'btn primary btn-sm', t('pushRec')); p.type = 'button'; p.title = t('pushHint');
       p.addEventListener('click', () => pushRecord(sv, p));
       row.insertBefore(p, row.firstChild);
@@ -526,7 +556,7 @@ function accountExtras(box){
 }
 
 /* ---------------------------------------------------------------- avvio */
-window.__wgCommunity = { render, decorateSaved, onEnd, nick: () => nick };
+window.__wgCommunity = { render, decorateSaved, onEnd, onSavedEnd, nick: () => nick };
 function start(){
   FB = window.__wgFB;
   if(!FB || !FB.app || !G()) return;
