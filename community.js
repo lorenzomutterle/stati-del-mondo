@@ -170,7 +170,7 @@ let root = null;
 function injectStyles(){
   const s = document.createElement('style');
   s.textContent = `
-  .pub-section{ margin:6px 0 18px; }
+  .pub-section{ margin:28px 0 18px; }
   .pub-section > .field-hint{ margin:6px 0 4px; }
   .pub-section .saved-head{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
   .pub-tools{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0 12px; }
